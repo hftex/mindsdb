@@ -20,7 +20,7 @@ from mindsdb_sql.planner.steps import (
 )
 
 from mindsdb.api.executor.sql_query.result_set import ResultSet, Column
-from mindsdb.utilities.cache import get_cache, dataframe_checksum
+from mindsdb.utilities.cache import get_cache, dataframe_checksum, json_checksum
 
 from .base import BaseStepCall
 
@@ -185,7 +185,7 @@ class ApplyPredictorStepCall(ApplyPredictorBaseCall):
             table_df = data.to_df()
 
             if self.session.predictor_cache is not False:
-                key = f'{predictor_name}_{predictor_id}_{dataframe_checksum(table_df)}'
+                key = f'{predictor_name}_{predictor_id}_{dataframe_checksum(table_df)}_{json_checksum(params)}'
 
                 predictor_cache = get_cache('predict')
                 predictions = predictor_cache.get(key)

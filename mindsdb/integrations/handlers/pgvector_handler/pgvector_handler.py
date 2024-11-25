@@ -221,7 +221,8 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         table_name = self._check_table(table_name)
 
         if columns is None:
-            columns = ["id", "content", "embeddings", "metadata"]
+            #columns = ["id", "content", "embeddings", "metadata"]
+            columns = ["id", "description", "embedding"]  #, "metadata"]
 
         query = self._build_select_query(table_name, columns, conditions, limit, offset)
         result = self.raw_query(query)

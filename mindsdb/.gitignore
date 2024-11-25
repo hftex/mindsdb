@@ -18,3 +18,4 @@ mindsdb_storage
 __pycache__/
 *.egg-info/
 *.egg
+mindsdb-venv
