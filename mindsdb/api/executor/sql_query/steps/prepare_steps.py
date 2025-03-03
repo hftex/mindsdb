@@ -1,15 +1,16 @@
-from mindsdb_sql.parser.ast import (
+from mindsdb_sql_parser.ast import (
     Identifier,
     Constant,
     Select,
     Star,
 )
-from mindsdb_sql.planner.steps import (
+from mindsdb.api.executor.planner.steps import (
     GetPredictorColumns,
     GetTableColumns,
 )
 
 from mindsdb.api.executor.sql_query.result_set import ResultSet, Column
+from mindsdb.utilities.config import config
 
 from .base import BaseStepCall
 
@@ -20,7 +21,7 @@ class GetPredictorColumnsCall(BaseStepCall):
 
     def call(self, step):
 
-        mindsdb_database_name = 'mindsdb'
+        mindsdb_database_name = config.get('default_project')
 
         predictor_name = step.predictor.parts[-1]
         dn = self.session.datahub.get(mindsdb_database_name)

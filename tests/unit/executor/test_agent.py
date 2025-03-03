@@ -1,8 +1,11 @@
 import os
-import pandas as pd
-from tests.unit.executor_test_base import BaseExecutorDummyML
-
 from unittest.mock import patch
+
+import pandas as pd
+import pytest
+
+from tests.unit.executor_test_base import BaseExecutorDummyML
+from mindsdb.interfaces.agents.langchain_agent import SkillData
 
 
 def set_openai_completion(mock_openai, response):
@@ -125,6 +128,78 @@ class TestAgent(BaseExecutorDummyML):
         assert len(ret) == 0
 
     @patch('openai.OpenAI')
+    def test_agent_with_tables(self, mock_openai):
+        sd = SkillData(
+            name='test', type='', project_id=1,
+            params={'tables': []},
+            agent_tables_list=[]
+        )
+
+        sd.params = {'tables': ['x', 'y']}
+        sd.agent_tables_list = ['x', 'y']
+        assert sd.restriction_on_tables == {None: {'x', 'y'}}
+
+        sd.params = {'tables': ['x', 'y']}
+        sd.agent_tables_list = ['x', 'y', 'z']
+        assert sd.restriction_on_tables == {None: {'x', 'y'}}
+
+        sd.params = {'tables': ['x', 'y']}
+        sd.agent_tables_list = ['x']
+        assert sd.restriction_on_tables == {None: {'x'}}
+
+        sd.params = {'tables': ['x', 'y']}
+        sd.agent_tables_list = ['z']
+        with pytest.raises(ValueError):
+            print(sd.restriction_on_tables)
+
+        sd.params = {'tables': ['x', {'schema': 'S', 'table': 'y'}]}
+        sd.agent_tables_list = ['x']
+        assert sd.restriction_on_tables == {None: {'x'}}
+
+        sd.params = {'tables': ['x', {'schema': 'S', 'table': 'y'}]}
+        sd.agent_tables_list = ['x', {'schema': 'S', 'table': 'y'}]
+        assert sd.restriction_on_tables == {None: {'x'}, 'S': {'y'}}
+
+        sd.params = {'tables': [{'schema': 'S', 'table': 'x'}, {'schema': 'S', 'table': 'y'}, {'schema': 'S', 'table': 'z'}]}
+        sd.agent_tables_list = [{'schema': 'S', 'table': 'y'}, {'schema': 'S', 'table': 'z'}, {'schema': 'S', 'table': 'f'}]
+        assert sd.restriction_on_tables == {'S': {'y', 'z'}}
+
+        sd.params = {'tables': [{'schema': 'S', 'table': 'x'}, {'schema': 'S', 'table': 'y'}]}
+        sd.agent_tables_list = [{'schema': 'S', 'table': 'z'}]
+        with pytest.raises(ValueError):
+            print(sd.restriction_on_tables)
+
+        self.run_sql('''
+            create skill test_skill
+            using
+            type = 'text2sql',
+            database = 'example_db',
+            tables = ['table_1', 'table_2'],
+            description = "this is sales data";
+        ''')
+
+        self.run_sql('''
+            create agent test_agent
+            using
+            model='gpt-3.5-turbo',
+            provider='openai',
+            openai_api_key='--',
+            prompt_template='Answer the user input in a helpful way using tools',
+            skills=[{
+                'name': 'test_skill',
+                'tables': ['table_2', 'table_3']
+            }];
+        ''')
+
+        resp = self.run_sql('''select * from information_schema.agents where name = 'test_agent';''')
+        assert len(resp) == 1
+        assert resp['SKILLS'][0] == ['test_skill']
+
+        agent_response = 'how can I assist you today?'
+        set_openai_completion(mock_openai, agent_response)
+        self.run_sql("select * from test_agent where question = 'test?'")
+
+    @patch('openai.OpenAI')
     def test_agent_stream(self, mock_openai):
         agent_response = 'how can I assist you today?'
         set_openai_completion(mock_openai, agent_response)
@@ -214,3 +289,60 @@ class TestAgent(BaseExecutorDummyML):
             # check kb input
             args, _ = kb_select.call_args
             assert user_question in args[0].where.args[1].value
+
+    def test_kb(self):
+
+        self.run_sql(
+            '''
+                CREATE model emb_model
+                PREDICT predicted
+                using
+                  column='content',
+                  engine='dummy_ml',
+                  join_learn_process=true
+            '''
+        )
+
+        self.run_sql('create knowledge base kb_review using model=emb_model')
+
+        self.run_sql("insert into kb_review (content) values ('review')")
+
+        # selectable
+        ret = self.run_sql("select * from kb_review")
+        assert len(ret) == 1
+
+        # show tables in default chromadb
+        ret = self.run_sql("show knowledge bases")
+
+        db_name = ret.STORAGE[0].split('.')[0]
+        ret = self.run_sql(f"show tables from {db_name}")
+        # only one default collection there
+        assert len(ret) == 1
+
+    def test_drop_demo_agent(self):
+        """should not be possible to drop demo agent
+        """
+        from mindsdb.api.executor.exceptions import ExecutorException
+        self.run_sql('''
+            CREATE AGENT my_demo_agent
+            USING
+                provider='openai',
+                model = "gpt-3.5-turbo",
+                openai_api_key='--',
+                prompt_template="--",
+                is_demo=true;
+         ''')
+        with pytest.raises(ExecutorException):
+            self.run_sql('drop agent my_agent')
+
+        self.run_sql('''
+            create skill my_demo_skill
+            using
+            type = 'text2sql',
+            database = 'example_db',
+            description = "",
+            is_demo=true;
+        ''')
+
+        with pytest.raises(ExecutorException):
+            self.run_sql('drop skill my_demo_skill')

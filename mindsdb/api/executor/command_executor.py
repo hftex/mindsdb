@@ -6,9 +6,8 @@ from functools import reduce
 
 import pandas as pd
 from mindsdb_evaluator.accuracy.general import evaluate_accuracy
-from mindsdb_sql import parse_sql
-from mindsdb_sql.planner.utils import query_traversal
-from mindsdb_sql.parser.ast import (
+from mindsdb_sql_parser import parse_sql
+from mindsdb_sql_parser.ast import (
     Alter,
     ASTNode,
     BinaryOperation,
@@ -21,7 +20,6 @@ from mindsdb_sql.parser.ast import (
     DropTables,
     DropView,
     Explain,
-    Function,
     Identifier,
     Insert,
     NativeQuery,
@@ -35,12 +33,11 @@ from mindsdb_sql.parser.ast import (
     Union,
     Update,
     Use,
-    Variable,
     Tuple,
 )
 
 # typed models
-from mindsdb_sql.parser.dialects.mindsdb import (
+from mindsdb_sql_parser.ast.mindsdb import (
     CreateAgent,
     CreateAnomalyDetectionModel,
     CreateChatBot,
@@ -70,7 +67,9 @@ from mindsdb_sql.parser.dialects.mindsdb import (
 )
 
 import mindsdb.utilities.profiler as profiler
-from mindsdb.api.executor import Column, SQLQuery, ResultSet
+
+from mindsdb.api.executor.sql_query.result_set import Column, ResultSet
+from mindsdb.api.executor.sql_query import SQLQuery
 from mindsdb.api.executor.data_types.answer import ExecuteAnswer
 from mindsdb.api.mysql.mysql_proxy.libs.constants.mysql import (
     CHARSET_NUMBERS,
@@ -457,7 +456,7 @@ class ExecuteCommands:
                     raise TableNotExistError(err_str)
                 return self.answer_show_table_status(table_name)
             elif sql_category == "columns":
-                is_full = statement.modes is not None and "full" in statement.modes
+                is_full = statement.modes is not None and "FULL" in statement.modes
                 return self.answer_show_columns(
                     statement.from_table,
                     statement.where,
@@ -596,8 +595,6 @@ class ExecuteCommands:
         ):
             return ExecuteAnswer()
         elif type(statement) is Select:
-            if statement.from_table is None:
-                return self.answer_single_row_select(statement, database_name)
             query = SQLQuery(statement, session=self.session, database=database_name)
             return self.answer_select(query)
         elif type(statement) is Union:
@@ -641,7 +638,7 @@ class ExecuteCommands:
         elif type(statement) is UpdateAgent:
             return self.answer_update_agent(statement, database_name)
         elif type(statement) is Evaluate:
-            statement.data = parse_sql(statement.query_str, dialect="mindsdb")
+            statement.data = parse_sql(statement.query_str)
             return self.answer_evaluate_metric(statement, database_name)
         else:
             logger.warning(f"Unknown SQL statement: {sql}")
@@ -1036,6 +1033,9 @@ class ExecuteCommands:
         storage = None
         try:
             handler_meta = self.session.integration_controller.get_handler_meta(engine)
+            if handler_meta is None:
+                raise ExecutorException(f"There is no engine '{engine}'")
+
             if handler_meta.get("import", {}).get("success") is not True:
                 raise ExecutorException(f"The '{engine}' handler isn't installed.\n" + get_handler_install_message(engine))
 
@@ -1253,7 +1253,7 @@ class ExecuteCommands:
             project_name = parts[0]
 
         query_str = statement.query_str
-        query = parse_sql(query_str, dialect="mindsdb")
+        query = parse_sql(query_str)
 
         if isinstance(statement.from_table, Identifier):
             query = Select(
@@ -1478,7 +1478,7 @@ class ExecuteCommands:
                 skills_to_remove=skills_to_remove,
                 params=statement.params
             )
-        except ValueError as e:
+        except (EntityExistsError, EntityNotExistsError, ValueError) as e:
             # Project does not exist or agent does not exist.
             raise ExecutorException(str(e))
 
@@ -1549,7 +1549,7 @@ class ExecuteCommands:
         elif isinstance(database_name, str) and len(database_name) > 0:
             db = database_name
         else:
-            db = "mindsdb"
+            db = self.session.config.get("default_project")
         table_name = target.parts[-1]
 
         new_where = BinaryOperation(
@@ -1591,49 +1591,6 @@ class ExecuteCommands:
 
         query = SQLQuery(new_statement, session=self.session, database=database_name)
         return self.answer_select(query)
-
-    def answer_single_row_select(self, statement, database_name):
-
-        def adapt_query(node, is_table, **kwargs):
-            if is_table:
-                return
-
-            if isinstance(node, Identifier):
-                if node.parts[-1].lower() == "session_user":
-                    return Constant(self.session.username, alias=node)
-
-            if isinstance(node, Function):
-                function_name = node.op.lower()
-
-                functions_results = {
-                    "database": database_name,
-                    "current_user": self.session.username,
-                    "user": self.session.username,
-                    "version": "8.0.17",
-                    "current_schema": "public",
-                    "connection_id": self.context.get('connection_id')
-                }
-                if function_name in functions_results:
-                    return Constant(functions_results[function_name], alias=Identifier(parts=[function_name]))
-
-            if isinstance(node, Variable):
-                var_name = node.value
-                column_name = f"@@{var_name}"
-                result = SERVER_VARIABLES.get(column_name)
-                if result is None:
-                    logger.error(f"Unknown variable: {column_name}")
-                    raise Exception(f"Unknown variable '{var_name}'")
-                else:
-                    return Constant(result[0], alias=Identifier(parts=[column_name]))
-
-        query_traversal(statement, adapt_query)
-
-        statement.from_table = Identifier('t')
-        df = query_df(pd.DataFrame([[0]]), statement, session=self.session)
-
-        return ExecuteAnswer(
-            data=ResultSet().from_df(df, table_name="")
-        )
 
     def answer_show_create_table(self, table):
         columns = [

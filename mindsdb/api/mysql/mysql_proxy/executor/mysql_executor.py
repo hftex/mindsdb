@@ -1,8 +1,9 @@
-from mindsdb_sql import parse_sql
-from mindsdb_sql.planner import utils as planner_utils
+from mindsdb_sql_parser import parse_sql
+from mindsdb.api.executor.planner import utils as planner_utils
 
 import mindsdb.utilities.profiler as profiler
-from mindsdb.api.executor import Column, SQLQuery
+from mindsdb.api.executor.sql_query.result_set import Column
+from mindsdb.api.executor.sql_query import SQLQuery
 from mindsdb.api.executor.command_executor import ExecuteCommands
 from mindsdb.api.mysql.mysql_proxy.utilities import ErSqlSyntaxError
 from mindsdb.utilities import log
@@ -96,38 +97,32 @@ class Executor:
 
     @profiler.profile()
     def query_execute(self, sql):
-        logger.info("%s.query_execute: sql - %s", self.__class__.__name__, sql)
-
         self.parse(sql)
         self.do_execute()
 
     @profiler.profile()
     def parse(self, sql):
-        logger.info("%s.parse: sql - %s", self.__class__.__name__, sql)
         self.sql = sql
         sql_lower = sql.lower()
         self.sql_lower = sql_lower.replace("`", "")
 
         try:
-            self.query = parse_sql(sql, dialect="mindsdb")
+            self.query = parse_sql(sql)
         except Exception as mdb_error:
-            try:
-                self.query = parse_sql(sql, dialect="mysql")
-            except Exception:
-                # not all statements are parsed by parse_sql
-                logger.warning(f"SQL statement is not parsed by mindsdb_sql: {sql}")
+            # not all statements are parsed by parse_sql
+            logger.warning('Failed to parse SQL query')
+            logger.debug(f'Query that cannot be parsed: {sql}')
 
-                raise ErSqlSyntaxError(
-                    f"SQL statement cannot be parsed by mindsdb_sql - {sql}: {mdb_error}"
-                ) from mdb_error
+            raise ErSqlSyntaxError(
+                f"The SQL statement cannot be parsed - {sql}: {mdb_error}"
+            ) from mdb_error
 
-                # == a place for workarounds ==
-                # or run sql in integration without parsing
+            # == a place for workarounds ==
+            # or run sql in integration without parsing
 
     @profiler.profile()
     def do_execute(self):
         # it can be already run at prepare state
-        logger.info("%s.do_execute", self.__class__.__name__)
         if self.is_executed:
             return
 
@@ -137,12 +132,8 @@ class Executor:
 
         self.is_executed = True
 
-        if self.sqlserver.session.api_type == 'http':
-            json_types = True
-        else:
-            json_types = False
         if ret.data is not None:
-            self.data = ret.data.to_lists(json_types=json_types)
+            self.data = ret.data
             self.columns = ret.data.columns
 
         self.state_track = ret.state_track

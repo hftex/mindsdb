@@ -5,10 +5,10 @@ import duckdb
 from duckdb import InvalidInputException
 import numpy as np
 
-from mindsdb_sql import parse_sql
-from mindsdb_sql.render.sqlalchemy_render import SqlalchemyRender
-from mindsdb_sql.planner.utils import query_traversal
-from mindsdb_sql.parser.ast import (
+from mindsdb_sql_parser import parse_sql
+from mindsdb.utilities.render.sqlalchemy_render import SqlalchemyRender
+from mindsdb.integrations.utilities.query_traversal import query_traversal
+from mindsdb_sql_parser.ast import (
     ASTNode, Select, Identifier,
     Function, Constant
 )
@@ -95,7 +95,7 @@ def query_df(df, query, session=None):
 
         Args:
             df (pandas.DataFrame): data
-            query (mindsdb_sql.parser.ast.Select | str): select query
+            query (mindsdb_sql_parser.ast.Select | str): select query
 
         Returns:
             pandas.DataFrame
@@ -182,14 +182,6 @@ def query_df(df, query, session=None):
                 df = df.astype({'CONNECTION_DATA': 'string'})
 
     result_df, description = query_df_with_type_infer_fallback(query_str, {'df': df}, user_functions=user_functions)
-    result_df = result_df.replace({np.nan: None})
-
-    new_column_names = {}
-    real_column_names = [x[0] for x in description]
-    for i, duck_column_name in enumerate(result_df.columns):
-        new_column_names[duck_column_name] = real_column_names[i]
-    result_df = result_df.rename(
-        new_column_names,
-        axis='columns'
-    )
+    result_df.replace({np.nan: None}, inplace=True)
+    result_df.columns = [x[0] for x in description]
     return result_df

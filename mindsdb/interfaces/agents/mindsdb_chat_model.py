@@ -28,11 +28,13 @@ from langchain_core.outputs import (
     ChatGeneration,
     ChatResult,
 )
-from langchain_core.pydantic_v1 import root_validator
+from pydantic import model_validator
 
 from mindsdb.interfaces.agents.constants import USER_COLUMN
+from mindsdb.utilities.config import config
 
 logger = logging.getLogger(__name__)
+default_project = config.get('default_project')
 
 
 def _convert_message_to_dict(message: BaseMessage) -> dict:
@@ -63,7 +65,7 @@ class ChatMindsdb(BaseChatModel):
     """A chat model that uses the Mindsdb"""
 
     model_name: str
-    project_name: Optional[str] = 'mindsdb'
+    project_name: Optional[str] = default_project
     model_info: Optional[dict] = None
     project_datanode: Optional[Any] = None
 
@@ -130,7 +132,7 @@ class ChatMindsdb(BaseChatModel):
             'messages': [result]
         }
 
-    @root_validator(allow_reuse=True)
+    @model_validator(mode='before')
     def validate_environment(cls, values: Dict) -> Dict:
 
         model_name = values['model_name']
@@ -139,7 +141,7 @@ class ChatMindsdb(BaseChatModel):
         from mindsdb.api.executor.controllers import SessionController
 
         session = SessionController()
-        session.database = 'mindsdb'
+        session.database = default_project
 
         values['model_info'] = session.model_controller.get_model(model_name, project_name=project_name)
 

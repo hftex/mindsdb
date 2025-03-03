@@ -18,7 +18,7 @@ class TestSelect(BaseExecutorDummyML):
         self.save_file('tasks', df)
 
         self.run_sql('''
-            create view mindsdb.vtasks (
+            create view mindsdb.vTasks (
                 select * from files.tasks where a=1
             )
         ''')
@@ -27,7 +27,7 @@ class TestSelect(BaseExecutorDummyML):
         self.run_sql(
             '''
                 CREATE model mindsdb.task_model
-                from mindsdb (select * from vtasks)
+                from mindsdb (select * from Vtasks)
                 PREDICT a
                 using engine='dummy_ml'
             '''
@@ -149,6 +149,75 @@ class TestSelect(BaseExecutorDummyML):
         assert row['t3c'] == 1
 
         assert row['t3a'] == 6
+
+    @patch('mindsdb.integrations.handlers.postgres_handler.Handler')
+    def test_joins_different_db(self, data_handler):
+        df1 = pd.DataFrame([
+            {'a': 1, 'c': 1},
+            {'a': 3, 'c': 2},
+        ])
+        df2 = pd.DataFrame([
+            {'a': 6, 'c': 1},
+            {'a': 4, 'c': 2},
+            {'a': 2, 'c': 3},
+        ])
+
+        self.set_data('tbl1', df1)
+        self.set_handler(data_handler, name='pg', tables={'tbl2': df2})
+
+        # --- test join table-table ---
+        ret = self.run_sql('''
+            SELECT *
+              FROM dummy_data.tbl1 as t1
+              JOIN pg.tbl2 as t2 on t1.c=t2.c
+        ''')
+
+        # must be 2 rows
+        assert len(ret) == 2
+
+        # second table is called with filter
+        calls = data_handler().query.call_args_list
+        sql = calls[0][0][0].to_string()
+        assert sql.strip() in (
+            # duckdb's `distinct` can return in different order
+            'SELECT * FROM tbl2 AS t2 WHERE c IN (1, 2)'
+            'SELECT * FROM tbl2 AS t2 WHERE c IN (2, 1)'
+        )
+
+        # --- using alias in order
+        ret = self.run_sql('''
+            SELECT t1.a + t2.a col1, min(t1.a) c
+              FROM dummy_data.tbl1 as t1
+              JOIN pg.tbl2 as t2 on t1.c=t2.c
+            group by col1
+            order by c
+        ''')
+        assert ret['c'][0] == 1  # alias is the same as column
+        assert ret['col1'][0] == 7
+
+    @patch('mindsdb.integrations.handlers.postgres_handler.Handler')
+    def test_implicit_join(self, data_handler):
+        df1 = pd.DataFrame([
+            {'a': 1, 'c': 1},
+            {'a': 3, 'c': 2},
+        ])
+        df2 = pd.DataFrame([
+            {'a': 6, 'c': 1},
+            {'a': 4, 'c': 2},
+            {'a': 2, 'c': 3},
+        ])
+
+        self.set_data('tbl1', df1)
+        self.set_handler(data_handler, name='pg', tables={'tbl2': df2})
+
+        # --- test join table-table ---
+        ret = self.run_sql('''
+            SELECT * FROM dummy_data.tbl1 as t1, pg.tbl2 as t2
+            where t1.c=t2.c
+        ''')
+
+        # must be 2 rows
+        assert len(ret) == 2
 
     def test_complex_queries(self):
 
@@ -296,6 +365,44 @@ class TestSelect(BaseExecutorDummyML):
         # -- unions functions --
 
         # TODO Correlated subqueries (not implemented)
+
+    @patch('mindsdb.integrations.handlers.postgres_handler.Handler')
+    def test_replace_suqueries(self, data_handler):
+
+        df = pd.DataFrame(
+            columns=['id', 'name'],
+            data=[
+                [1, 'asia'],
+                [2, 'europe'],
+                [3, 'africa'],
+                [3, 'australia'],
+            ]
+        )
+        self.set_handler(data_handler, name='pg', tables={'branch': df})
+
+        empty = pd.DataFrame(
+            columns=['name'],
+            data=[
+                [None],
+            ]
+        )
+        self.save_file('empty', empty)
+
+        sql = '''
+            select
+               cast(
+                  (select COUNT(*) from pg.branch where `name` in ('asia', 'africa')) as FLOAT
+               )
+               /
+               ( select COUNT(*) from  pg.branch )
+               * 100 as percentage
+        '''
+        ret = self.run_sql(sql)
+        assert ret.iloc[0, 0] == 50
+
+        sql += ' from files.empty '
+        ret = self.run_sql(sql)
+        assert ret.iloc[0, 0] == 50
 
     def test_last(self):
         df = pd.DataFrame([
@@ -481,6 +588,30 @@ class TestSelect(BaseExecutorDummyML):
 
         assert ret.iloc[0, 0] == 1
         assert ret.iloc[0, 1] == 'utf8'
+
+    def test_mysql_queries(self):
+        self.run_sql('SHOW KEYS FROM `mindsdb`.`predictors`')
+
+        self.run_sql('show full columns from `predictors`')
+
+        self.run_sql('SHOW FULL TABLES FROM files')
+
+    def test_select_without_table(self):
+        test_data = (
+            ('session_user', None),
+            ('version()', '8.0.17'),
+            ('@@version_comment', '(MindsDB)'),
+            ('1', 1)
+        )
+
+        for target, response in test_data:
+            ret = self.run_sql(f'select {target}')
+            assert len(ret) == 1
+            assert ret.iloc[0, 0] == response
+
+        with pytest.raises(Exception) as exc_info:
+            self.run_sql('select $$')
+        assert 'check the manual that corresponds to your server version for the right syntax' in str(exc_info.value)
 
 
 class TestDML(BaseExecutorDummyML):

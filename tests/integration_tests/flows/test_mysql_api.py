@@ -31,6 +31,8 @@ class Dlist(list):
     """Service class for convenient work with list of dicts(db response)"""
 
     def __contains__(self, item):
+        if len(self) == 0:
+            return False
         if item in self.__getitem__(0):
             return True
         return False
@@ -83,7 +85,8 @@ class BaseStuff:
                 command=cmd,
                 remove=True,
                 volumes={str(tmpdirname): {'bind': '/temp', 'mode': 'ro'}},
-                environment={"MYSQL_PWD": self.config["auth"]["password"]}
+                environment={"MYSQL_PWD": self.config["auth"]["password"]},
+                network="host"
             )
         return self.to_dicts(res.decode(encoding))
 
@@ -163,7 +166,7 @@ class TestMySqlApi(BaseStuff):
     def setup_class(cls):
 
         cls.docker_client = docker.from_env()
-        cls.mysql_image = 'mysql:8.1.0'
+        cls.mysql_image = 'mysql:9.1.0'
         cls.config = json.loads(Path(os.path.join(TEMP_DIR, "config.json")).read_text())
 
         cls.launch_query_tmpl = "mysql --host=%s --port=%s --user=%s --database=mindsdb" % (

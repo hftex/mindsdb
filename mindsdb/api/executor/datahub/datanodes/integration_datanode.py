@@ -1,4 +1,6 @@
 import time
+import inspect
+from typing import Optional
 
 import numpy as np
 from numpy import dtype as np_dtype
@@ -8,7 +10,7 @@ from sqlalchemy.types import (
     Integer, Float, Text
 )
 
-from mindsdb_sql.parser.ast import Insert, Identifier, CreateTable, TableColumn, DropTables
+from mindsdb_sql_parser.ast import Insert, Identifier, CreateTable, TableColumn, DropTables
 
 from mindsdb.api.executor.datahub.datanodes.datanode import DataNode
 from mindsdb.api.executor.data_types.response_type import RESPONSE_TYPE
@@ -53,8 +55,11 @@ class IntegrationDataNode(DataNode):
     def has_table(self, tableName):
         return True
 
-    def get_table_columns(self, tableName):
-        response = self.integration_handler.get_columns(tableName)
+    def get_table_columns(self, table_name: str, schema_name: Optional[str] = None):
+        if 'schema_name' in inspect.signature(self.integration_handler.get_columns).parameters:
+            response = self.integration_handler.get_columns(table_name, schema_name)
+        else:
+            response = self.integration_handler.get_columns(table_name)
         if response.type == RESPONSE_TYPE.TABLE:
             df = response.data_frame
             # case independent
@@ -76,7 +81,7 @@ class IntegrationDataNode(DataNode):
             if 'type' in columns:
                 types = df[df.columns[columns.index('type')]]
             else:
-                types = [None] * len(columns)
+                types = [None] * len(names)
 
             ret = []
             for i, name in enumerate(names):
@@ -109,13 +114,20 @@ class IntegrationDataNode(DataNode):
         if columns is None:
             columns = []
 
-            for col in result_set.columns:
+            df = result_set.get_raw_df()
+
+            for idx, col in enumerate(result_set.columns):
+                dtype = col.type
                 # assume this is pandas type
                 column_type = Text
-                if isinstance(col.type, np_dtype):
-                    if pd_types.is_integer_dtype(col.type):
+                if isinstance(dtype, np_dtype):
+                    if pd_types.is_object_dtype(dtype):
+                        # try to infer
+                        dtype = df[idx].infer_objects().dtype
+
+                    if pd_types.is_integer_dtype(dtype):
                         column_type = Integer
-                    elif pd_types.is_numeric_dtype(col.type):
+                    elif pd_types.is_numeric_dtype(dtype):
                         column_type = Float
 
                 columns.append(
@@ -164,11 +176,12 @@ class IntegrationDataNode(DataNode):
         for col_idx, col in enumerate(result_set.columns):
             column_type = table_columns_meta[col.alias]
 
-            type_name = 'str'
             if column_type == Integer:
                 type_name = 'int'
             elif column_type == Float:
                 type_name = 'float'
+            else:
+                continue
 
             try:
                 result_set.set_col_type(col_idx, type_name)
@@ -256,12 +269,8 @@ class IntegrationDataNode(DataNode):
             df = df.to_frame()
 
         try:
-            df = df.replace(np.NaN, pd.NA)
-        except Exception as e:
-            logger.error(f"Issue with clearing DF from NaN values: {e}")
-
-        try:
-            df = df.where(pd.notnull(df), None)
+            # replace python's Nan, np.NaN, np.nan and pd.NA to None
+            df.replace([np.NaN, pd.NA], None, inplace=True)
         except Exception as e:
             logger.error(f"Issue with clearing DF from NaN values: {e}")
         # endregion

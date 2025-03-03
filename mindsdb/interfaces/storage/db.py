@@ -1,6 +1,5 @@
-import datetime
 import json
-import os
+import datetime
 from typing import Dict, List
 
 import numpy as np
@@ -11,8 +10,9 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    LargeBinary,
+    Numeric,
     String,
-    Table,
     UniqueConstraint,
     create_engine,
     text,
@@ -21,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import (
     Mapped,
+    mapped_column,
     declarative_base,
     relationship,
     scoped_session,
@@ -29,6 +30,7 @@ from sqlalchemy.orm import (
 from sqlalchemy.sql.schema import ForeignKey
 
 from mindsdb.utilities.json_encoder import CustomJSONEncoder
+from mindsdb.utilities.config import config
 
 
 class Base:
@@ -43,7 +45,7 @@ session, engine = None, None
 def init(connection_str: str = None):
     global Base, session, engine
     if connection_str is None:
-        connection_str = os.environ["MINDSDB_DB_CON"]
+        connection_str = config['storage_db']
     base_args = {
         "pool_size": 30,
         "max_overflow": 200,
@@ -158,7 +160,6 @@ class Predictor(Base):
     integration_id = Column(ForeignKey("integration.id", name="fk_integration_id"))
     data_integration_ref = Column(Json)
     fetch_data_query = Column(String)
-    is_custom = Column(Boolean)
     learn_args = Column(Json)
     update_status = Column(String, default="up_to_date")
     status = Column(String)
@@ -169,7 +170,6 @@ class Predictor(Base):
     training_stop_at = Column(DateTime)
     label = Column(String, nullable=True)
     version = Column(Integer, default=1)
-
     code = Column(String, nullable=True)
     lightwood_version = Column(String, nullable=True)
     dtype_dict = Column(Json, nullable=True)
@@ -179,7 +179,7 @@ class Predictor(Base):
     training_phase_current = Column(Integer)
     training_phase_total = Column(Integer)
     training_phase_name = Column(String)
-    hostname = Column(String)
+    training_metadata = Column(JSON, default={}, nullable=False)
 
     @staticmethod
     def get_name_and_version(full_name):
@@ -213,22 +213,11 @@ class Project(Base):
     )
     deleted_at = Column(DateTime)
     name = Column(String, nullable=False)
-    company_id = Column(Integer)
+    company_id = Column(Integer, default=0)
+    metadata_: dict = Column("metadata", JSON, nullable=True)
     __table_args__ = (
         UniqueConstraint("name", "company_id", name="unique_project_name_company_id"),
     )
-
-
-class Log(Base):
-    __tablename__ = "log"
-
-    id = Column(Integer, primary_key=True)
-    created_at = Column(DateTime, default=datetime.datetime.now)
-    log_type = Column(String)  # log, info, warning, traceback etc
-    source = Column(String)  # file + line
-    company_id = Column(Integer)
-    payload = Column(String)
-    created_at_index = Index("some_index", "created_at_index")
 
 
 class Integration(Base):
@@ -259,6 +248,7 @@ class File(Base):
     row_count = Column(Integer, nullable=False)
     columns = Column(Json, nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.now)
+    metadata_: dict = Column("metadata", JSON, nullable=True)
     updated_at = Column(
         DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now
     )
@@ -288,7 +278,19 @@ class JsonStorage(Base):
     resource_id = Column(Integer)
     name = Column(String)
     content = Column(JSON)
+    encrypted_content = Column(LargeBinary, nullable=True)
     company_id = Column(Integer)
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "resource_group": self.resource_group,
+            "resource_id": self.resource_id,
+            "name": self.name,
+            "content": self.content,
+            "encrypted_content": self.encrypted_content,
+            "company_id": self.company_id,
+        }
 
 
 class Jobs(Base):
@@ -421,20 +423,21 @@ class Tasks(Base):
     created_at = Column(DateTime, default=datetime.datetime.now)
 
 
-agent_skills_table = Table(
-    "agent_skills",
-    Base.metadata,
-    Column("agent_id", ForeignKey("agents.id"), primary_key=True),
-    Column("skill_id", ForeignKey("skills.id"), primary_key=True),
-)
+class AgentSkillsAssociation(Base):
+    __tablename__ = "agent_skills"
+
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"), primary_key=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id"), primary_key=True)
+    parameters: Mapped[dict] = mapped_column(JSON, default={}, nullable=True)
+
+    agent = relationship("Agents", back_populates="skills_relationships")
+    skill = relationship("Skills", back_populates="agents_relationships")
 
 
 class Skills(Base):
     __tablename__ = "skills"
     id = Column(Integer, primary_key=True)
-    agents: Mapped[List["Agents"]] = relationship(
-        secondary=agent_skills_table, back_populates="skills"
-    )
+    agents_relationships: Mapped[List["Agents"]] = relationship(AgentSkillsAssociation, back_populates="skill")
     name = Column(String, nullable=False)
     project_id = Column(Integer, nullable=False)
     type = Column(String, nullable=False)
@@ -451,7 +454,7 @@ class Skills(Base):
             "id": self.id,
             "name": self.name,
             "project_id": self.project_id,
-            "agent_ids": [a.id for a in self.agents],
+            "agent_ids": [rel.agent.id for rel in self.agents_relationships],
             "type": self.type,
             "params": self.params,
             "created_at": self.created_at,
@@ -461,9 +464,7 @@ class Skills(Base):
 class Agents(Base):
     __tablename__ = "agents"
     id = Column(Integer, primary_key=True)
-    skills: Mapped[List["Skills"]] = relationship(
-        secondary=agent_skills_table, back_populates="agents"
-    )
+    skills_relationships: Mapped[List["Skills"]] = relationship(AgentSkillsAssociation, back_populates="agent")
     company_id = Column(Integer, nullable=True)
     user_class = Column(Integer, nullable=True)
 
@@ -486,7 +487,8 @@ class Agents(Base):
             "name": self.name,
             "project_id": self.project_id,
             "model_name": self.model_name,
-            "skills": [s.as_dict() for s in self.skills],
+            "skills": [rel.skill.as_dict() for rel in self.skills_relationships],
+            "skills_extra_parameters": {rel.skill.name: (rel.parameters or {}) for rel in self.skills_relationships},
             "provider": self.provider,
             "params": self.params,
             "updated_at": self.updated_at,
@@ -565,17 +567,23 @@ class QueryContext(Base):
 class LLMLog(Base):
     __tablename__ = "llm_log"
     id: int = Column(Integer, primary_key=True)
-    company_id: int = Column(Integer, nullable=True)
+    company_id: int = Column(Integer, nullable=False)
     api_key: str = Column(String, nullable=True)
-    model_id: int = Column(Integer, nullable=False)
-    input: str = Column(String, nullable=True)
-    output: str = Column(String, nullable=True)
+    model_id: int = Column(Integer, nullable=True)
+    model_group: str = Column(String, nullable=True)
+    input: str = Column(JSON, nullable=True)
+    output: str = Column(JSON, nullable=True)
     start_time: datetime = Column(DateTime, nullable=False)
     end_time: datetime = Column(DateTime, nullable=True)
+    cost: float = Column(Numeric(5, 2), nullable=True)
     prompt_tokens: int = Column(Integer, nullable=True)
     completion_tokens: int = Column(Integer, nullable=True)
     total_tokens: int = Column(Integer, nullable=True)
     success: bool = Column(Boolean, nullable=False, default=True)
+    exception: str = Column(String, nullable=True)
+    traceback: str = Column(String, nullable=True)
+    stream: bool = Column(Boolean, default=False, comment="Is this completion done in 'streaming' mode")
+    metadata_: dict = Column("metadata", JSON, nullable=True)
 
 
 class LLMData(Base):

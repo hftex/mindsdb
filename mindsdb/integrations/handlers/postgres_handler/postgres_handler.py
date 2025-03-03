@@ -1,5 +1,6 @@
 import time
 import json
+from typing import Optional
 
 import pandas as pd
 import psycopg
@@ -7,9 +8,9 @@ from psycopg.postgres import types
 from psycopg.pq import ExecStatus
 from pandas import DataFrame
 
-from mindsdb_sql import parse_sql
-from mindsdb_sql.render.sqlalchemy_render import SqlalchemyRender
-from mindsdb_sql.parser.ast.base import ASTNode
+from mindsdb_sql_parser import parse_sql
+from mindsdb.utilities.render.sqlalchemy_render import SqlalchemyRender
+from mindsdb_sql_parser.ast.base import ASTNode
 
 from mindsdb.integrations.libs.base import DatabaseHandler
 from mindsdb.utilities import log
@@ -67,6 +68,9 @@ class PostgresHandler(DatabaseHandler):
 
         if self.connection_args.get('sslmode'):
             config['sslmode'] = self.connection_args.get('sslmode')
+
+        if self.connection_args.get('autocommit'):
+            config['autocommit'] = self.connection_args.get('autocommit')
 
         # If schema is not provided set public as default one
         if self.connection_args.get('schema'):
@@ -133,7 +137,7 @@ class PostgresHandler(DatabaseHandler):
 
         return response
 
-    def _cast_dtypes(self, df: DataFrame, description: list) -> None:
+    def _cast_dtypes(self, df: DataFrame, description: list) -> DataFrame:
         """
         Cast df dtypes basing on postgres types
             Note:
@@ -157,16 +161,19 @@ class PostgresHandler(DatabaseHandler):
             'float4': 'float32',
             'float8': 'float64'
         }
-        for column_index, _ in enumerate(df.columns):
-            col = df.iloc[:, column_index]  # column names could be duplicated
+        columns = df.columns
+        df.columns = list(range(len(columns)))
+        for column_index, column_name in enumerate(df.columns):
+            col = df[column_name]
             if str(col.dtype) == 'object':
                 pg_type = types.get(description[column_index].type_code)
                 if pg_type is not None and pg_type.name in types_map:
                     col = col.fillna(0)
                     try:
-                        df.iloc[:, column_index] = col.astype(types_map[pg_type.name])
+                        df[column_name] = col.astype(types_map[pg_type.name])
                     except ValueError as e:
                         logger.error(f'Error casting column {col.name} to {types_map[pg_type.name]}: {e}')
+        df.columns = columns
 
     @profiler.profile()
     def native_query(self, query: str, params=None) -> Response:
@@ -251,14 +258,17 @@ class PostgresHandler(DatabaseHandler):
         logger.debug(f"Executing SQL query: {query_str}")
         return self.native_query(query_str, params)
 
-    def get_tables(self) -> Response:
+    def get_tables(self, all: bool = False) -> Response:
         """
         Retrieves a list of all non-system tables and views in the current schema of the PostgreSQL database.
 
         Returns:
             Response: A response object containing the list of tables and views, formatted as per the `Response` class.
         """
-        query = """
+        all_filter = 'and table_schema = current_schema()'
+        if all is True:
+            all_filter = ''
+        query = f"""
             SELECT
                 table_schema,
                 table_name,
@@ -268,25 +278,31 @@ class PostgresHandler(DatabaseHandler):
             WHERE
                 table_schema NOT IN ('information_schema', 'pg_catalog')
                 and table_type in ('BASE TABLE', 'VIEW')
-                and table_schema = current_schema()
+                {all_filter}
         """
         return self.native_query(query)
 
-    def get_columns(self, table_name: str) -> Response:
+    def get_columns(self, table_name: str, schema_name: Optional[str] = None) -> Response:
         """
         Retrieves column details for a specified table in the PostgreSQL database.
 
         Args:
             table_name (str): The name of the table for which to retrieve column information.
+            schema_name (str): The name of the schema in which the table is located.
 
         Returns:
             Response: A response object containing the column details, formatted as per the `Response` class.
+
         Raises:
             ValueError: If the 'table_name' is not a valid string.
         """
 
         if not table_name or not isinstance(table_name, str):
             raise ValueError("Invalid table name provided.")
+        if isinstance(schema_name, str):
+            schema_name = f"'{schema_name}'"
+        else:
+            schema_name = 'current_schema()'
         query = f"""
             SELECT
                 column_name as "Field",
@@ -296,12 +312,11 @@ class PostgresHandler(DatabaseHandler):
             WHERE
                 table_name = '{table_name}'
             AND
-                table_schema = current_schema()
+                table_schema = {schema_name}
         """
         return self.native_query(query)
 
     def subscribe(self, stop_event, callback, table_name, columns=None, **kwargs):
-
         config = self._make_connection_args()
         config['autocommit'] = True
 

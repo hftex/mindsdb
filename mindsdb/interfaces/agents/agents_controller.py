@@ -1,21 +1,26 @@
 import datetime
-from typing import Dict, Iterator, List, Union
+from typing import Dict, Iterator, List, Union, Tuple, Optional
 
 from langchain_core.tools import BaseTool
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import null
 import pandas as pd
 
-from mindsdb.interfaces.model.functions import PredictorRecordNotFound
+from mindsdb.interfaces.storage import db
 from mindsdb.interfaces.storage.db import Predictor
+from mindsdb.utilities.context import context as ctx
+from mindsdb.interfaces.database.projects import ProjectController
+from mindsdb.interfaces.model.functions import PredictorRecordNotFound
 from mindsdb.interfaces.model.model_controller import ModelController
 from mindsdb.interfaces.skills.skills_controller import SkillsController
-from mindsdb.interfaces.storage import db
-from mindsdb.interfaces.database.projects import ProjectController
-from mindsdb.utilities.context import context as ctx
+from mindsdb.utilities.config import config
+from mindsdb.utilities.exception import EntityExistsError, EntityNotExistsError
 
 from .constants import ASSISTANT_COLUMN, SUPPORTED_PROVIDERS, PROVIDER_TO_MODELS
 from .langchain_agent import get_llm_provider
+
+
+default_project = config.get('default_project')
 
 
 class AgentsController:
@@ -39,7 +44,7 @@ class AgentsController:
         self.skills_controller = skills_controller
         self.model_controller = model_controller
 
-    def check_model_provider(self, model_name: str, provider: str = None) -> (dict, str):
+    def check_model_provider(self, model_name: str, provider: str = None) -> Tuple[dict, str]:
         '''
         Checks if a model exists, and gets the provider of the model.
 
@@ -69,7 +74,7 @@ class AgentsController:
 
         return model, provider
 
-    def get_agent(self, agent_name: str, project_name: str = 'mindsdb') -> db.Agents:
+    def get_agent(self, agent_name: str, project_name: str = default_project) -> Optional[db.Agents]:
         '''
         Gets an agent by name.
 
@@ -78,7 +83,7 @@ class AgentsController:
             project_name (str): The name of the containing project - must exist
 
         Returns:
-            agent (db.Agents): The database agent object
+            agent (Optional[db.Agents]): The database agent object
         '''
 
         project = self.project_controller.get(name=project_name)
@@ -90,7 +95,7 @@ class AgentsController:
         ).first()
         return agent
 
-    def get_agent_by_id(self, id: int, project_name: str = 'mindsdb') -> db.Agents:
+    def get_agent_by_id(self, id: int, project_name: str = default_project) -> db.Agents:
         '''
         Gets an agent by id.
 
@@ -139,7 +144,7 @@ class AgentsController:
             name: str,
             project_name: str,
             model_name: str,
-            skills: List[str],
+            skills: List[Union[str, dict]],
             provider: str = None,
             params: Dict[str, str] = {}) -> db.Agents:
         '''
@@ -149,7 +154,8 @@ class AgentsController:
             name (str): The name of the new agent
             project_name (str): The containing project
             model_name (str): The name of the existing ML model the agent will use
-            skills (List[str]): List of existing skill names to add to the new agent
+            skills (List[Union[str, dict]]): List of existing skill names to add to the new agent, or list of dicts
+                 with one of keys is "name", and other is additional parameters for relationship agent<>skill
             provider (str): The provider of the model
             params (Dict[str, str]): Parameters to use when running the agent
 
@@ -160,7 +166,7 @@ class AgentsController:
             ValueError: Agent with given name already exists, or skill/model with given name does not exist.
         '''
         if project_name is None:
-            project_name = 'mindsdb'
+            project_name = default_project
         project = self.project_controller.get(name=project_name)
 
         agent = self.get_agent(name, project_name)
@@ -179,14 +185,24 @@ class AgentsController:
             provider=provider,
             params=params,
         )
-        skills_to_add = []
-        # Check if given skills exist.
+
         for skill in skills:
-            existing_skill = self.skills_controller.get_skill(skill, project_name)
+            if isinstance(skill, str):
+                skill_name = skill
+                parameters = {}
+            else:
+                parameters = skill.copy()
+                skill_name = parameters.pop('name')
+            existing_skill = self.skills_controller.get_skill(skill_name, project_name)
             if existing_skill is None:
-                raise ValueError(f'Skill with name does not exist: {skill}')
-            skills_to_add.append(existing_skill)
-        agent.skills = skills_to_add
+                db.session.rollback()
+                raise ValueError(f'Skill with name does not exist: {skill_name}')
+            association = db.AgentSkillsAssociation(
+                parameters=parameters,
+                agent=agent,
+                skill=existing_skill
+            )
+            db.session.add(association)
 
         db.session.add(agent)
         db.session.commit()
@@ -196,11 +212,12 @@ class AgentsController:
     def update_agent(
             self,
             agent_name: str,
-            project_name: str = 'mindsdb',
+            project_name: str = default_project,
             name: str = None,
             model_name: str = None,
-            skills_to_add: List[str] = None,
+            skills_to_add: List[Union[str, dict]] = None,
             skills_to_remove: List[str] = None,
+            skills_to_rewrite: List[Union[str, dict]] = None,
             provider: str = None,
             params: Dict[str, str] = None):
         '''
@@ -211,8 +228,10 @@ class AgentsController:
             project_name (str): The containing project
             name (str): The updated name of the agent
             model_name (str): The name of the existing ML model the agent will use
-            skills_to_add (List[str]): List of skill names to add to the agent
+            skills_to_add (List[Union[str, dict]]): List of skill names to add to the agent, or list of dicts
+                 with one of keys is "name", and other is additional parameters for relationship agent<>skill
             skills_to_remove (List[str]): List of skill names to remove from the agent
+            skills_to_rewrite (List[Union[str, dict]]): new list of skills for the agent
             provider (str): The provider of the model
             params: (Dict[str, str]): Parameters to use when running the agent
 
@@ -220,18 +239,39 @@ class AgentsController:
             agent (db.Agents): The created or updated agent
 
         Raises:
-            ValueError: Agent with name not found, agent with new name already exists, or model/skill does not exist.
+            EntityExistsError: if agent with new name already exists
+            EntityNotExistsError: if agent with name or skill not found
+            ValueError: if conflict in skills list
         '''
+
+        skills_to_add = skills_to_add or []
+        skills_to_remove = skills_to_remove or []
+        skills_to_rewrite = skills_to_rewrite or []
+
+        if len(skills_to_rewrite) > 0 and (len(skills_to_remove) > 0 or len(skills_to_add) > 0):
+            raise ValueError(
+                "'skills_to_rewrite' and 'skills_to_add' (or 'skills_to_remove') cannot be used at the same time"
+            )
 
         existing_agent = self.get_agent(agent_name, project_name=project_name)
         if existing_agent is None:
-            raise ValueError(f'Agent with name not found: {agent_name}')
+            raise EntityNotExistsError(f'Agent with name not found: {agent_name}')
+        is_demo = (existing_agent.params or {}).get('is_demo', False)
+        if (
+            is_demo and (
+                (name is not None and name != agent_name)
+                or (model_name is not None and existing_agent.model_name != model_name)
+                or (provider is not None and existing_agent.provider != provider)
+                or (isinstance(params, dict) and len(params) > 0 and 'prompt_template' not in params)
+            )
+        ):
+            raise ValueError("It is forbidden to change properties of the demo object")
 
         if name is not None and name != agent_name:
             # Check to see if updated name already exists
             agent_with_new_name = self.get_agent(name, project_name=project_name)
             if agent_with_new_name is not None:
-                raise ValueError(f'Agent with updated name already exists: {name}')
+                raise EntityExistsError(f'Agent with updated name already exists: {name}')
             existing_agent.name = name
 
         if model_name or provider:
@@ -241,21 +281,61 @@ class AgentsController:
             existing_agent.model_name = model_name
             existing_agent.provider = provider
 
-        # Check if given skills exist.
-        new_skills = []
-        for skill in skills_to_add:
-            existing_skill = self.skills_controller.get_skill(skill, project_name)
-            if existing_skill is None:
-                raise ValueError(f'Skill with name does not exist: {skill}')
-            new_skills.append(existing_skill)
-        existing_agent.skills = list(set(existing_agent.skills + new_skills))
+        # check that all skills exist
+        skill_name_to_record_map = {}
+        for skill_meta in (skills_to_add + skills_to_remove + skills_to_rewrite):
+            skill_name = skill_meta['name'] if isinstance(skill_meta, dict) else skill_meta
+            if skill_name not in skill_name_to_record_map:
+                skill_record = self.skills_controller.get_skill(skill_name, project_name)
+                if skill_record is None:
+                    raise EntityNotExistsError(f'Skill with name does not exist: {skill_name}')
+                skill_name_to_record_map[skill_name] = skill_record
 
-        removed_skills = []
-        for skill in existing_agent.skills:
-            if skill.name in skills_to_remove:
-                removed_skills.append(skill)
-        for skill_to_remove in removed_skills:
-            existing_agent.skills.remove(skill_to_remove)
+        if len(skills_to_add) > 0 or len(skills_to_remove) > 0:
+            skills_to_add = [{'name': x} if isinstance(x, str) else x for x in skills_to_add]
+            skills_to_add_names = [x['name'] for x in skills_to_add]
+
+            # there are no intersection between lists
+            if not set(skills_to_add_names).isdisjoint(set(skills_to_remove)):
+                raise ValueError('Conflict between skills to add and skills to remove.')
+
+            existing_agent_skills_names = [rel.skill.name for rel in existing_agent.skills_relationships]
+
+            # remove skills
+            for skill_name in skills_to_remove:
+                for rel in existing_agent.skills_relationships:
+                    if rel.skill.name == skill_name:
+                        db.session.delete(rel)
+
+            # add skills
+            for skill_name in (set(skills_to_add_names) - set(existing_agent_skills_names)):
+                skill_parameters = next(x for x in skills_to_add if x['name'] == skill_name).copy()
+                del skill_parameters['name']
+                association = db.AgentSkillsAssociation(
+                    parameters=skill_parameters,
+                    agent=existing_agent,
+                    skill=skill_name_to_record_map[skill_name]
+                )
+                db.session.add(association)
+        elif len(skills_to_rewrite) > 0:
+            skill_name_to_parameters = {x['name']: {
+                k: v for k, v in x.items() if k != 'name'
+            } for x in skills_to_rewrite}
+            existing_skill_names = set()
+            for rel in existing_agent.skills_relationships:
+                if rel.skill.name not in skill_name_to_parameters:
+                    db.session.delete(rel)
+                else:
+                    existing_skill_names.add(rel.skill.name)
+                    rel.parameters = skill_name_to_parameters[rel.skill.name]
+                    flag_modified(rel, 'parameters')
+            for new_skill_name in (set(skill_name_to_parameters) - existing_skill_names):
+                association = db.AgentSkillsAssociation(
+                    parameters=skill_name_to_parameters[new_skill_name],
+                    agent=existing_agent,
+                    skill=skill_name_to_record_map[new_skill_name]
+                )
+                db.session.add(association)
 
         if params is not None:
             # Merge params on update
@@ -271,7 +351,7 @@ class AgentsController:
 
         return existing_agent
 
-    def delete_agent(self, agent_name: str, project_name: str = 'mindsdb'):
+    def delete_agent(self, agent_name: str, project_name: str = default_project):
         '''
         Deletes an agent by name.
 
@@ -286,6 +366,8 @@ class AgentsController:
         agent = self.get_agent(agent_name, project_name)
         if agent is None:
             raise ValueError(f'Agent with name does not exist: {agent_name}')
+        if isinstance(agent.params, dict) and agent.params.get('is_demo') is True:
+            raise ValueError('Unable to delete demo object')
         agent.deleted_at = datetime.datetime.now()
         db.session.commit()
 
@@ -293,27 +375,25 @@ class AgentsController:
             self,
             agent: db.Agents,
             messages: List[Dict[str, str]],
-            project_name: str = 'mindsdb',
+            project_name: str = default_project,
             tools: List[BaseTool] = None,
             stream: bool = False) -> Union[Iterator[object], pd.DataFrame]:
-        '''
+        """
         Queries an agent to get a completion.
 
         Parameters:
             agent (db.Agents): Existing agent to get completion from
             messages (List[Dict[str, str]]): Chat history to send to the agent
-            trace_id (str): ID of Langfuse trace to use
-            observation_id (str): ID of parent Langfuse observation to use
             project_name (str): Project the agent belongs to (default mindsdb)
             tools (List[BaseTool]): Tools to use while getting the completion
-            stream (bool): Whether or not to stream the response
+            stream (bool): Whether to stream the response
 
         Returns:
             response (Union[Iterator[object], pd.DataFrame]): Completion as a DataFrame or iterator of completion chunks
 
         Raises:
             ValueError: Agent's model does not exist.
-        '''
+        """
         if stream:
             return self._get_completion_stream(
                 agent,
@@ -336,7 +416,7 @@ class AgentsController:
             self,
             agent: db.Agents,
             messages: List[Dict[str, str]],
-            project_name: str = 'mindsdb',
+            project_name: str = default_project,
             tools: List[BaseTool] = None) -> Iterator[object]:
         '''
         Queries an agent to get a stream of completion chunks.

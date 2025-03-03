@@ -1,6 +1,4 @@
 from unittest.mock import patch
-import datetime as dt
-import pytest
 
 import pandas as pd
 
@@ -46,6 +44,17 @@ class TestSchema(BaseExecutorDummyML):
 
         df = self.run_sql('describe view v1')
         assert df.NAME[0] == 'v1' and df.QUERY[0] == 'select * from models'
+
+        # columns of view
+        ret = self.run_sql('show columns from v1')
+        assert 'NAME' in list(ret.Field)
+
+        # columns of table
+        ret = self.run_sql('show full columns from table1', database='dummy_data')
+        assert 'Collation' in list(ret.columns)
+
+        ret = self.run_sql('show columns from table1', database='dummy_data')
+        assert 'Collation' not in list(ret.columns)
 
         # model
         self.run_sql('''
@@ -220,46 +229,3 @@ class TestSchema(BaseExecutorDummyML):
         ret = self.run_sql("SELECT * FROM information_schema.columns WHERE table_schema='pg'")
 
         assert list(ret['COLUMN_NAME']) == ['aa', 'bb']
-
-    def test_llm_log(self):
-        from mindsdb.interfaces.database.log import LLMLogTable
-
-        ret = self.run_sql('select * from log.llm_log')
-        assert len(ret) == 0
-
-        record = self.db.Predictor(
-            id=1,
-            project_id=0,
-            name='test'
-        )
-        self.db.session.add(record)
-        self.db.session.commit()
-
-        for j in range(2):
-            for i in range(3 + j):
-                record = self.db.LLMLog(
-                    api_key=f'api_key_{j}',
-                    model_id=1,
-                    input='test_input',
-                    output='test_output',
-                    prompt_tokens=i,
-                    completion_tokens=i,
-                    total_tokens=i,
-                    start_time=dt.datetime.now(),
-                    end_time=dt.datetime.now()
-                )
-                self.db.session.add(record)
-                self.db.session.commit()
-
-        ret = self.run_sql('select * from log.llm_log')
-        assert len(ret) == 7
-        assert sorted([x.upper() for x in list(ret.columns)]) == sorted([x.upper() for x in LLMLogTable.columns])
-
-        with pytest.raises(Exception):
-            self.run_sql('select company_id from log.llm_log')
-
-        ret = self.run_sql("select model_name, input, output, api_key from log.llm_log where api_key = 'api_key_1'")
-        assert len(ret) == 4
-        assert len(ret.columns) == 4
-        assert ret['model_name'][0] == 'test'
-        assert ret['api_key'][0] == 'api_key_1'

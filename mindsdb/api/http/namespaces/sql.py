@@ -1,3 +1,4 @@
+from http import HTTPStatus
 import traceback
 
 from flask import request
@@ -5,6 +6,7 @@ from flask_restx import Resource
 
 import mindsdb.utilities.hooks as hooks
 import mindsdb.utilities.profiler as profiler
+from mindsdb.api.http.utils import http_error
 from mindsdb.api.http.namespaces.configs.sql import ns_conf
 from mindsdb.api.mysql.mysql_proxy.classes.fake_mysql_proxy import FakeMysqlProxy
 from mindsdb.api.executor.data_types.response_type import (
@@ -31,6 +33,14 @@ class Query(Resource):
         query = request.json["query"]
         context = request.json.get("context", {})
 
+        if isinstance(query, str) is False or isinstance(context, dict) is False:
+            return http_error(
+                HTTPStatus.BAD_REQUEST,
+                'Wrong arguments',
+                'Please provide "query" with the request.'
+            )
+        logger.debug(f'Incoming query: {query}')
+
         if context.get("profiling") is True:
             profiler.enable()
 
@@ -51,9 +61,10 @@ class Query(Resource):
                 if result.type == SQL_RESPONSE_TYPE.OK:
                     query_response = {"type": SQL_RESPONSE_TYPE.OK}
                 elif result.type == SQL_RESPONSE_TYPE.TABLE:
+                    data = result.data.to_lists(json_types=True)
                     query_response = {
                         "type": SQL_RESPONSE_TYPE.TABLE,
-                        "data": result.data,
+                        "data": data,
                         "column_names": [
                             x["alias"] or x["name"] if "alias" in x else x["name"]
                             for x in result.columns
@@ -67,6 +78,7 @@ class Query(Resource):
                     "error_code": 0,
                     "error_message": str(e),
                 }
+                logger.error(f"Error query processing: \n{traceback.format_exc()}")
 
             except UnknownError as e:
                 # unclassified
@@ -76,6 +88,7 @@ class Query(Resource):
                     "error_code": 0,
                     "error_message": str(e),
                 }
+                logger.error(f"Error query processing: \n{traceback.format_exc()}")
 
             except Exception as e:
                 error_type = "unexpected"
@@ -84,7 +97,7 @@ class Query(Resource):
                     "error_code": 0,
                     "error_message": str(e),
                 }
-                logger.error(f"Error profiling query: \n{traceback.format_exc()}")
+                logger.error(f"Error query processing: \n{traceback.format_exc()}")
 
             if query_response.get("type") == SQL_RESPONSE_TYPE.ERROR:
                 error_type = "expected"

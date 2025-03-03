@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from mindsdb_sql.parser.dialects.mindsdb import CreateMLEngine
-from mindsdb_sql.parser.ast import Identifier
+from mindsdb_sql_parser.ast.mindsdb import CreateMLEngine
+from mindsdb_sql_parser.ast import Identifier
 
 from tests.unit.executor_test_base import BaseExecutorDummyML
 
@@ -66,10 +66,10 @@ class TestBYOM(BaseExecutorDummyML):
 
         self._create_engine(name='myml', code=code,
                             type=byom_type, mode='custom_function')
-
+        # convert to explicit types, because duckdb doesn't convert it and fails
         ret = self.run_sql('''
             select myml.fibo(b) x,
-                   myml.add1(a,b) y,
+                   myml.add1(a::char,b::char) y,
                    myml.add2(a,b) z
             from pg.sample
         ''')

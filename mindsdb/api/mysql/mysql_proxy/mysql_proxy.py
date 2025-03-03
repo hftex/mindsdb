@@ -26,6 +26,9 @@ from typing import Dict, List
 from numpy import dtype as np_dtype
 from pandas.api import types as pd_types
 
+from mindsdb.api.mysql.mysql_proxy.libs.constants.mysql import NULL_VALUE
+from mindsdb.api.mysql.mysql_proxy.data_types.mysql_datum import Datum
+
 import mindsdb.utilities.hooks as hooks
 import mindsdb.utilities.profiler as profiler
 from mindsdb.api.mysql.mysql_proxy.classes.client_capabilities import ClentCapabilities
@@ -78,8 +81,9 @@ from mindsdb.api.executor import exceptions as exec_exc
 from mindsdb.api.common.check_auth import check_auth
 from mindsdb.api.mysql.mysql_proxy.utilities.lightwood_dtype import dtype
 from mindsdb.utilities import log
-from mindsdb.utilities.config import Config
+from mindsdb.utilities.config import config
 from mindsdb.utilities.context import context as ctx
+from mindsdb.utilities.otel.metric_handlers import get_query_request_counter
 from mindsdb.utilities.wizards import make_ssl_cert
 
 logger = log.getLogger(__name__)
@@ -316,7 +320,13 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
     def send_query_answer(self, answer: SQLAnswer):
         if answer.type == RESPONSE_TYPE.TABLE:
             packages = []
-            packages += self.get_tabel_packets(columns=answer.columns, data=answer.data)
+
+            if len(answer.data) > 1000:
+                # for big responses leverage pandas map function to convert data to packages
+                self.send_table_packets(columns=answer.columns, data=answer.data)
+            else:
+                packages += self.get_table_packets(columns=answer.columns, data=answer.data.to_lists())
+
             if answer.status is not None:
                 packages.append(self.last_packet(status=answer.status))
             else:
@@ -329,12 +339,12 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
                 ErrPacket, err_code=answer.error_code, msg=answer.error_message
             ).send()
 
-    def _get_column_defenition_packets(self, columns, data=None):
+    def _get_column_defenition_packets(self, columns, data=None, columns_len=None):
         if data is None:
             data = []
         packets = []
         for i, column in enumerate(columns):
-            logger.info(
+            logger.debug(
                 "%s._get_column_defenition_packets: handling column - %s of %s type",
                 self.__class__.__name__,
                 column,
@@ -344,15 +354,18 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
             column_name = column.get("name", "column_name")
             column_alias = column.get("alias", column_name)
             flags = column.get("flags", 0)
-            if len(data) == 0:
-                length = 0xFFFF
+            if columns_len is not None:
+                length = columns_len[i]
             else:
-                length = 1
-                for row in data:
-                    if isinstance(row, dict):
-                        length = max(len(str(row[column_alias])), length)
-                    else:
-                        length = max(len(str(row[i])), length)
+                if len(data) == 0:
+                    length = 0xFFFF
+                else:
+                    length = 1
+                    for row in data:
+                        if isinstance(row, dict):
+                            length = max(len(str(row[column_alias])), length)
+                        else:
+                            length = max(len(str(row[i])), length)
 
             packets.append(
                 self.packet(
@@ -370,7 +383,7 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
             )
         return packets
 
-    def get_tabel_packets(self, columns, data, status=0):
+    def get_table_packets(self, columns, data, status=0):
         # TODO remove columns order
         packets = [self.packet(ColumnCountPacket, count=len(columns))]
         packets.extend(self._get_column_defenition_packets(columns, data))
@@ -380,6 +393,47 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
 
         packets += [self.packet(ResultsetRowPacket, data=x) for x in data]
         return packets
+
+    def send_table_packets(self, columns, data, status=0):
+        # text protocol, convert all to string and serialize as packages
+        df = data.get_raw_df()
+
+        def apply_f(v):
+            if v is None:
+                return NULL_VALUE
+            if not isinstance(v, str):
+                v = str(v)
+            return Datum.serialize_str(v)
+
+        # get column max size
+        # column_len is used by mysql client to determine width of columns, so it is not mandatory
+        # to get exactly max value. We can approximate them by sample.
+        columns_len = None
+        if len(df) > 0:
+            sample = df.head(100)
+            columns_len = []
+            for column in sample.columns:
+                try:
+                    columns_len.append(sample[column].astype(str).str.len().max())
+                except Exception:
+                    columns_len.append(1)
+
+        # columns packages
+        packets = [self.packet(ColumnCountPacket, count=len(columns))]
+
+        packets.extend(self._get_column_defenition_packets(columns, columns_len=columns_len))
+
+        if self.client_capabilities.DEPRECATE_EOF is False:
+            packets.append(self.packet(EofPacket, status=status))
+        self.send_package_group(packets)
+
+        chunk_size = 100
+        for start in range(0, len(df), chunk_size):
+            string = b"".join([
+                self.packet(body=body, length=len(body)).accum()
+                for body in df[start:start + chunk_size].applymap(apply_f).values.sum(axis=1)
+            ])
+            self.socket.sendall(string)
 
     def decode_utf(self, text):
         try:
@@ -394,7 +448,6 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
         connection. '0000' selected because in real mysql connection it should be lenght of package,
         and it can not be 0.
         """
-        config = Config()
         is_cloud = config.get("cloud", False)
 
         if sys.platform != "linux" or is_cloud is False:
@@ -509,6 +562,12 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
                 data=executor.data,
                 status=executor.server_status,
             )
+
+        # Increment the counter and include metadata in attributes
+        metadata = ctx.metadata(query=sql)
+        query_request_counter = get_query_request_counter()
+        query_request_counter.add(1, metadata)
+
         return resp
 
     def answer_stmt_prepare(self, sql):
@@ -563,16 +622,16 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
 
         if self.client_capabilities.DEPRECATE_EOF is False:
             packages.append(self.packet(EofPacket, status=0x0062))
-        else:
-            # send all
-            for row in executor.data:
-                packages.append(
-                    self.packet(BinaryResultsetRowPacket, data=row, columns=columns_def)
-                )
 
-            server_status = executor.server_status or 0x0002
-            packages.append(self.last_packet(status=server_status))
-            prepared_stmt["fetched"] += len(executor.data)
+        # send all
+        for row in executor.data.to_lists():
+            packages.append(
+                self.packet(BinaryResultsetRowPacket, data=row, columns=columns_def)
+            )
+
+        server_status = executor.server_status or 0x0002
+        packages.append(self.last_packet(status=server_status))
+        prepared_stmt["fetched"] += len(executor.data)
 
         return self.send_package_group(packages)
 
@@ -589,7 +648,7 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
 
         packages = []
         columns = self.to_mysql_columns(executor.columns)
-        for row in executor.data[fetched:limit]:
+        for row in executor.data[fetched:limit].to_lists():
             packages.append(
                 self.packet(BinaryResultsetRowPacket, data=row, columns=columns)
             )
@@ -684,9 +743,9 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
                 if p.type.value == COMMANDS.COM_QUERY:
                     sql = self.decode_utf(p.sql.value)
                     sql = SqlStatementParser.clear_sql(sql)
-                    logger.debug(f"COM_QUERY: {sql}")
+                    logger.debug(f'Incoming query: {sql}')
                     profiler.set_meta(
-                        query=sql, api="mysql", environment=Config().get("environment")
+                        query=sql, api="mysql", environment=config.get("environment")
                     )
                     with profiler.Context("mysql_query_processing"):
                         response = self.process_query(sql)
@@ -817,6 +876,9 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
     def set_context(self, context):
         if "db" in context:
             self.session.database = context["db"]
+        else:
+            self.session.database = config.get('default_project')
+
         if "profiling" in context:
             self.session.profiling = context["profiling"]
         if "predictor_cache" in context:
@@ -843,7 +905,6 @@ class MysqlProxy(SocketServer.BaseRequestHandler):
         Create a server and wait for incoming connections until Ctrl-C
         """
         global logger
-        config = Config()
 
         cert_path = config["api"]["mysql"].get("certificate_path")
         if cert_path is None or cert_path == "":

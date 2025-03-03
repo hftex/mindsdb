@@ -34,8 +34,8 @@
     }
   ],
   "topbarCtaButton": {
-    "name": "Get Started",
-    "url": "https://github.com/mindsdb/mindsdb"
+    "name": "Try Demo",
+    "url": "http://mdb.ai/register"
   },
   "anchors": [
     {
@@ -284,10 +284,10 @@
               ]
             }
           ]
-        }
+        },
+        "minds-demo"
       ]
     },
-
     {
       "group": "Features",
       "pages": [
@@ -508,6 +508,15 @@
           "pages": [
             "mindsdb_sql/functions/custom_functions",
             "mindsdb_sql/functions/llm_function"
+          ]
+        },
+        {
+          "group": "Standard SQL Support",
+          "pages": [
+            "mindsdb_sql/sql_support/cte",
+            "mindsdb_sql/sql_support/case-when",
+            "mindsdb_sql/sql_support/aggregate-functions",
+            "mindsdb_sql/sql_support/window-functions"
           ]
         }
       ]
@@ -898,6 +907,7 @@
       "group": "Data Sources",
       "pages": [
         "integrations/data-overview",
+        "integrations/sample-database",
         {
           "group": "Applications",
           "pages": [
@@ -914,6 +924,7 @@
             "integrations/app-integrations/instatus",
             "integrations/app-integrations/intercom",
             "integrations/app-integrations/mediawiki",
+            "integrations/app-integrations/microsoft-onedrive",
             "integrations/app-integrations/microsoft-teams",
             "integrations/app-integrations/newsapi",
             "integrations/app-integrations/paypal",
@@ -1006,9 +1017,20 @@
           "group": "Vector Stores",
           "pages": [
             "integrations/vector-db-integrations/chromadb",
+            "integrations/vector-db-integrations/couchbase",
             "integrations/vector-db-integrations/pgvector",
             "integrations/vector-db-integrations/pinecone",
             "integrations/vector-db-integrations/weaviate"
+          ]
+        },
+        {
+          "group": "Files",
+          "pages": [
+            "integrations/files/csv-xlsx-xls",
+            "integrations/files/json",
+            "integrations/files/txt",
+            "integrations/files/pdf",
+            "integrations/files/parquet"
           ]
         }
       ]
@@ -1084,6 +1106,7 @@
             {
               "group": "Image Models",
               "pages": [
+                "integrations/ai-engines/clipdrop",
                 "integrations/ai-engines/replicate-text2img",
                 "integrations/ai-engines/replicate-img2text"
               ]

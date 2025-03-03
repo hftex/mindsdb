@@ -1,9 +1,9 @@
 import pandas as pd
 import mysql.connector
 
-from mindsdb_sql import parse_sql
-from mindsdb_sql.render.sqlalchemy_render import SqlalchemyRender
-from mindsdb_sql.parser.ast.base import ASTNode
+from mindsdb_sql_parser import parse_sql
+from mindsdb.utilities.render.sqlalchemy_render import SqlalchemyRender
+from mindsdb_sql_parser.ast.base import ASTNode
 
 from mindsdb.utilities import log
 from mindsdb.integrations.libs.base import DatabaseHandler
@@ -92,6 +92,8 @@ class MySQLHandler(DatabaseHandler):
                 config["ssl_cert"] = ssl_cert
             if ssl_key is not None:
                 config["ssl_key"] = ssl_key
+        if 'collation' not in config:
+            config['collation'] = 'utf8mb4_general_ci'
         try:
             connection = mysql.connector.connect(**config)
             connection.autocommit = True

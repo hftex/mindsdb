@@ -37,8 +37,9 @@ MAIN_EXCLUDE_PATHS = ["mindsdb/integrations/handlers/.*_handler", "pryproject.to
 # and not explicitly imported in mindsdb.
 # transformers is required for langchain_core and not explicitly imported by mindsdb.
 MAIN_RULE_IGNORES = {
-    "DEP001": ["torch", "pgvector"],
-    "DEP002": ["psycopg2-binary", "lark", "transformers"],
+    "DEP003": ["torch"],
+    "DEP001": ["torch", "pgvector", "pyarrow", "openai"],
+    "DEP002": ["psycopg2-binary", "lark", "transformers", "langchain-experimental", "lxml", "openpyxl"]
 }
 
 
@@ -49,7 +50,7 @@ MAIN_RULE_IGNORES = {
 # Or 2) because they are imported in an unusual way. E.g.:
 #   - pysqlite3 in the chromadb handler
 #   - dspy-ai in langchain handler
-OPTIONAL_HANDLER_DEPS = ["torch", "tiktoken", "wikipedia", "openpyxl",
+OPTIONAL_HANDLER_DEPS = ["torch", "tiktoken", "wikipedia",
                          "sentence-transformers", "faiss-cpu", "litellm", "chromadb", "dspy-ai", "sqlalchemy-solr"]
 
 # List of rules we can ignore for specific packages
@@ -66,10 +67,11 @@ GCS_HANDLER_DEPS = ["gcsfs"]
 
 HANDLER_RULE_IGNORES = {
     "DEP002": OPTIONAL_HANDLER_DEPS + MAIN_REQUIREMENTS_DEPS + BYOM_HANLDER_DEPS + HIVE_HANDLER_DEPS + GCS_HANDLER_DEPS,
-    "DEP001": ["tests"]  # 'tests' is the mindsdb tests folder in the repo root
+    "DEP001": ["tests", "pyarrow", "IfxPyDbi", "ingres_sa_dialect"]  # 'tests' is the mindsdb tests folder in the repo root, 'pyarrow' used in snowflake handler
 }
 
 PACKAGE_NAME_MAP = {
+    "azure-storage-blob": ["azure"],
     "scylla-driver": ["cassandra"],
     "mysql-connector-python": ["mysql"],
     "snowflake-connector-python": ["snowflake"],
@@ -86,6 +88,7 @@ PACKAGE_NAME_MAP = {
     "google-cloud-storage": ["google"],
     "protobuf": ["google"],
     "google-api-python-client": ["googleapiclient"],
+    "ibm-cos-sdk": ["ibm_boto3", "ibm_botocore"],
     "binance-connector": ["binance"],
     "pysqlite3": ["pysqlite3"],
     "atlassian-python-api": ["atlassian"],
@@ -126,8 +129,16 @@ PACKAGE_NAME_MAP = {
     "auto-ts": ["auto_ts"],
     "llama-index-readers-web": ["llama_index"],
     "llama-index-embeddings-openai": ["llama_index"],
+    "unifyai": ["unify"],
     "botframework-connector": ["botframework"],
-    "botbuilder-schema": ["botbuilder"]
+    "botbuilder-schema": ["botbuilder"],
+    "opentelemetry-api": ["opentelemetry"],
+    "opentelemetry-sdk": ["opentelemetry"],
+    "opentelemetry-exporter-otlp": ["opentelemetry"],
+    "opentelemetry-instrumentation-requests": ["opentelemetry"],
+    "opentelemetry-instrumentation-flask": ["opentelemetry"],
+    "opentelemetry-distro": ["opentelemetry"],
+    "sqlalchemy-ingres": ["ingres_sa_dialect"]
 }
 
 # We use this to exit with a non-zero status code if any check fails

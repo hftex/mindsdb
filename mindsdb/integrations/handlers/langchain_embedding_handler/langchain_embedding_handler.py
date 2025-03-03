@@ -3,11 +3,14 @@ import importlib
 from typing import Dict, Union
 
 import pandas as pd
-from langchain.embeddings.base import Embeddings
 from pandas import DataFrame
+from pydantic import BaseModel
 
 from mindsdb.integrations.libs.base import BaseMLEngine
 from mindsdb.utilities import log
+from langchain_core.embeddings import Embeddings
+from mindsdb.integrations.handlers.langchain_embedding_handler.vllm_embeddings import VLLMEmbeddings
+from mindsdb.integrations.handlers.langchain_embedding_handler.fastapi_embeddings import FastAPIEmbeddings
 
 logger = log.getLogger(__name__)
 
@@ -16,7 +19,13 @@ logger = log.getLogger(__name__)
 # for each class, we get a more user friendly name for it
 # E.g. OpenAIEmbeddings -> OpenAI
 # This is used for the user to select the embedding model
-EMBEDDING_MODELS = {}
+EMBEDDING_MODELS = {
+    'VLLM': 'VLLMEmbeddings',
+    'vllm': 'VLLMEmbeddings',
+    'FastAPI': 'FastAPIEmbeddings',
+    'fastapi': 'FastAPIEmbeddings'
+
+}
 
 try:
     module = importlib.import_module("langchain_community.embeddings")
@@ -46,6 +55,14 @@ def get_langchain_class(class_name: str) -> Embeddings:
     Returns:
         langchain.embeddings.BaseEmbedding: The class object
     """
+    # First check if it's our custom VLLMEmbeddings
+    if class_name == "VLLMEmbeddings":
+        return VLLMEmbeddings
+
+    if class_name == "FastAPIEmbeddings":
+        return FastAPIEmbeddings
+
+    # Then try langchain_community.embeddings
     try:
         module = importlib.import_module("langchain_community.embeddings")
         class_ = getattr(module, class_name)
@@ -73,7 +90,13 @@ def construct_model_from_args(args: Dict) -> Embeddings:
         class_name = EMBEDDING_MODELS[class_name]
     MODEL_CLASS = get_langchain_class(class_name)
     serialized_dict = copy.deepcopy(args)
-    serialized_dict.pop("input_columns", None)
+
+    # Make sure we don't pass in unnecessary arguments.
+    if issubclass(MODEL_CLASS, BaseModel):
+        serialized_dict = {
+            k: v for k, v in serialized_dict.items() if k in MODEL_CLASS.model_fields
+        }
+
     model = MODEL_CLASS(**serialized_dict)
     if target is not None:
         args["target"] = target

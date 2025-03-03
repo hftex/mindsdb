@@ -4,7 +4,7 @@ from mindsdb.integrations.libs.response import (
     HandlerStatusResponse as StatusResponse,
 )
 from mindsdb.utilities import log
-from mindsdb_sql import parse_sql
+from mindsdb_sql_parser import parse_sql
 
 from atlassian import Jira
 from typing import Optional
@@ -55,9 +55,23 @@ class JiraHandler(APIHandler):
             return self.connection
         
         s = requests.Session()
+        if self.connection_data.get("cloud", False):
+            params = {
+                "cloud": True,
+                "username": self.connection_data['jira_username'],
+                "password": self.connection_data['jira_api_token'],
+                "url": self.connection_data['jira_url'],
+            }   
+        else:
+            params = {
+                "cloud": False,
+                "url": self.connection_data['jira_url'],
+                "session": s
+            }
+
         s.headers['Authorization'] =  f"Bearer {self.connection_data['jira_api_token']}"
 
-        self.connection = Jira(url= self.connection_data['jira_url'], session=s)
+        self.connection = Jira(**params)
         self.is_connected = True
 
 
@@ -107,7 +121,7 @@ class JiraHandler(APIHandler):
         StatusResponse
             Request status
         """
-        ast = parse_sql(query, dialect="mindsdb")
+        ast = parse_sql(query)
         return self.query(ast)
    
     def construct_jql(self):

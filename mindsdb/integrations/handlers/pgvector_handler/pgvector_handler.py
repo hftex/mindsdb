@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 import psycopg
-from mindsdb_sql.parser.ast import Parameter, Identifier, Update, BinaryOperation
+from mindsdb_sql_parser.ast import Parameter, Identifier, Update, BinaryOperation
 from pgvector.psycopg import register_vector
 
 from mindsdb.integrations.handlers.postgres_handler.postgres_handler import (
@@ -16,17 +16,14 @@ from mindsdb.integrations.libs.response import RESPONSE_TYPE, HandlerResponse as
 from mindsdb.integrations.libs.vectordatabase_handler import (
     FilterCondition,
     VectorStoreHandler,
+    DistanceFunction,
+    TableField
 )
 from mindsdb.utilities import log
 from mindsdb.utilities.profiler import profiler
 from mindsdb.utilities.context import context as ctx
 
 logger = log.getLogger(__name__)
-
-class DistanceFunction(Enum):
-        SQUARED_EUCLIDEAN_DISTANCE = '<->',
-        NEGATIVE_DOT_PRODUCT = '<#>',
-        COSINE_DISTANCE = '<=>'
 
 
 # todo Issue #7316 add support for different indexes and search algorithms e.g. cosine similarity or L2 norm
@@ -39,6 +36,12 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
 
         super().__init__(name=name, **kwargs)
         self._is_shared_db = False
+        self._is_vector_registered = False
+        # we get these from the connection args on PostgresHandler parent
+        self._is_sparse = self.connection_args.get('is_sparse', False)
+        self._vector_size = self.connection_args.get('vector_size', None) 
+        if self._is_sparse and not self._vector_size:
+            raise ValueError("vector_size is required when is_sparse=True")
         self.connect()
 
     def _make_connection_args(self):
@@ -80,6 +83,8 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         Handles the connection to a PostgreSQL database instance.
         """
         self.connection = super().connect()
+        if self._is_vector_registered:
+            return self.connection
 
         with self.connection.cursor() as cur:
             try:
@@ -96,6 +101,7 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
 
         # register vector type with psycopg2 connection
         register_vector(self.connection)
+        self._is_vector_registered = True
 
         return self.connection
 
@@ -189,13 +195,30 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         if filter_conditions:
 
             if embedding_search:
-                # if search vector, return similar rows, apply other filters after if any
                 search_vector = filter_conditions["embeddings"]["value"][0]
                 filter_conditions.pop("embeddings")
-                return f"SELECT {targets} FROM {table_name} ORDER BY embeddings <=> '{search_vector}' {after_from_clause}"
+
+                if self._is_sparse:
+                    # Convert dict to sparse vector if needed
+                    if isinstance(search_vector, dict):
+                        from pgvector.utils import SparseVector
+                        embedding = SparseVector(search_vector, self._vector_size)
+                        search_vector = embedding.to_text()
+                    # Use inner product for sparse vectors
+                    distance_op = "<#>"
+                else:
+                    # Convert list to vector string if needed
+                    if isinstance(search_vector, list):
+                        search_vector = f"[{','.join(str(x) for x in search_vector)}]"
+                    # Use cosine similarity for dense vectors
+                    distance_op = "<=>"
+
+                return f"SELECT {targets} FROM {table_name} ORDER BY embeddings {distance_op} '{search_vector}' ASC {after_from_clause}"
+
             else:
-                # if filter conditions, return filtered rows
+                # if filter conditions, return rows that satisfy the conditions
                 return f"SELECT {targets} FROM {table_name} {after_from_clause}"
+
         else:
             # if no filter conditions, return all rows
             return f"SELECT {targets} FROM {table_name} {after_from_clause}"
@@ -239,11 +262,8 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         embeddings: List[float],
         query: str = None,
         metadata: Dict[str, str] = None,
-        id_column_name = 'id',
-        content_column_name = 'content',
-        embeddings_column_name = 'embeddings',
-        metadata_column_name = 'metadata',
-        distance_function = DistanceFunction.COSINE_DISTANCE
+        distance_function = DistanceFunction.COSINE_DISTANCE,
+        **kwargs
     ) -> pd.DataFrame:
         '''
         Executes a hybrid search, combining semantic search and one or both of keyword/metadata search.
@@ -255,11 +275,13 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
             embeddings(List[float]): Embedding vector to perform semantic search against
             query(str): User query to convert into keywords for keyword search
             metadata(Dict[str, str]): Metadata filters to filter content rows against
+            distance_function(DistanceFunction): Distance function used to compare embeddings vectors for semantic search
+
+        Kwargs:
             id_column_name(str): Name of ID column in underlying table
             content_column_name(str): Name of column containing document content in underlying table
             embeddings_column_name(str): Name of column containing embeddings vectors in underlying table
             metadata_column_name(str): Name of column containing metadata key-value pairs in underlying table
-            distance_function(DistanceFunction): Distance function used to compare embeddings vectors for semantic search
 
         Returns:
             df(pd.DataFrame): Hybrid search result, sorted by hybrid search rank
@@ -267,6 +289,10 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         if query is None and metadata is None:
             raise ValueError('Must provide at least one of: query for keyword search, or metadata filters. For only embeddings search, use normal search instead.')
 
+        id_column_name = kwargs.get('id_column_name', 'id')
+        content_column_name = kwargs.get('content_column_name', 'content')
+        embeddings_column_name = kwargs.get('embeddings_column_name', 'embeddings')
+        metadata_column_name = kwargs.get('metadata_column_name', 'metadata')
         # Filter by given metadata for semantic search & full text search CTEs, if present.
         where_clause = ' WHERE '
         if metadata is None:
@@ -336,14 +362,30 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         full_search_query = f'{semantic_search_cte}{full_text_search_cte}{hybrid_select}'
         return self.raw_query(full_search_query)
 
-    def create_table(self, table_name: str, if_not_exists=True):
-        """
-        Run a create table query on the pgvector database.
-        """
-        table_name = self._check_table(table_name)
+    def create_table(self, table_name: str):
+        """Create a table with a vector column."""
+        with self.connection.cursor() as cur:
+            # For sparse vectors, use sparsevec type
+            vector_column_type = 'sparsevec' if self._is_sparse else 'vector'
+            
+            # Vector size is required for sparse vectors, optional for dense
+            if self._is_sparse and not self._vector_size:
+                raise ValueError("vector_size is required for sparse vectors")
+            
+            # Add vector size specification only if provided
+            size_spec = f"({self._vector_size})" if self._vector_size is not None else "()"
+            if vector_column_type == 'vector':
+                size_spec = ''
 
-        query = f"CREATE TABLE IF NOT EXISTS {table_name} (id text PRIMARY KEY, content text, embeddings vector, metadata jsonb)"
-        self.raw_query(query)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    id TEXT PRIMARY KEY,
+                    embeddings {vector_column_type}{size_spec},
+                    content TEXT,
+                    metadata JSONB
+                )
+            """)
+            self.connection.commit()
 
     def insert(
         self, table_name: str, data: pd.DataFrame
@@ -401,6 +443,14 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
             where=where
         )
 
+        if TableField.METADATA.value in data.columns:
+            def fnc(v):
+                if isinstance(v, dict):
+                    return json.dumps(v)
+            data[TableField.METADATA.value] = data[TableField.METADATA.value].apply(fnc)
+
+            data = data.astype({TableField.METADATA.value: str})
+
         transposed_data = []
         for _, record in data.iterrows():
             row = [
@@ -433,4 +483,3 @@ class PgVectorHandler(VectorStoreHandler, PostgresHandler):
         """
         table_name = self._check_table(table_name)
         self.raw_query(f"DROP TABLE IF EXISTS {table_name}")
-
