@@ -5,6 +5,7 @@ import datetime
 import tempfile
 from pathlib import Path
 from http import HTTPStatus
+import json
 
 from dateutil.tz import tzlocal
 from dateutil.parser import parse as parse_datetime
@@ -47,11 +48,12 @@ class GetConfig(Resource):
     @api_endpoint_metrics('GET', '/config')
     def get(self):
         config = Config()
-        return {
-            'auth': {
-                'http_auth_enabled': config['auth']['http_auth_enabled']
-            }
-        }
+        return config.get_all()
+        # return {
+        #     'auth': {
+        #         'http_auth_enabled': config['auth']['http_auth_enabled']
+        #     }
+        # }
 
     @ns_conf.doc('put_config')
     @api_endpoint_metrics('PUT', '/config')

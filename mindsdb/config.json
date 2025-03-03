@@ -1,0 +1,31 @@
+{
+    "log_level": "DEBUG",
+    "cache": {
+        "type": "none"  
+    },
+    "auth":{
+        "http_auth_enabled": false,
+        "http_permanent_session_lifetime": 86400,
+        "username": "mindsdb",
+        "password": "password"
+    },
+    "api": {
+        "http": {
+            "host": "127.0.0.1",
+            "port": "47334"
+        },
+        "mysql": {
+            "host": "0.0.0.0",
+            "port": "47335",
+            "database": "mindsdb",
+            "user": "mindsdb",
+            "password": "test",
+            "ssl": true
+        },
+        "mongodb": {
+            "host": "127.0.0.1",
+            "port": "47336",
+            "database": "mindsdb"
+        }
+    }
+}
